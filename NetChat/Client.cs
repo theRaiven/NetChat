@@ -24,18 +24,23 @@ class Client
         StreamReader? Reader = null;
         StreamWriter? Writer = null;
 
+        var cts = new CancellationTokenSource();
+
         try
         {
-            client.Connect(Host, Port); // подключаемся к серверу
+            await client.ConnectAsync(Host, Port);  // подключаемся к серверу
             Reader = new StreamReader(client.GetStream());
             Writer = new StreamWriter(client.GetStream());
             if (Writer is null || Reader is null) return;
 
             // запускаем новый поток для получения данных
-            _ = Task.Run(() => ReceiveMessageAsync(Reader));
+            var receiveTask = Task.Run(() => ReceiveMessageAsync(Reader, cts.Token));
 
             // запускаем ввод сообщений
             await SendMessageAsync(Writer);
+
+            cts.Cancel();       // остановить Receive
+            await receiveTask;  // дождаться завершения
         }
         catch (Exception ex)
         {
@@ -57,14 +62,17 @@ class Client
         while (true)
         {
             string? message = ReadLine();
-            if (message is null) break;
+
+            if (string.IsNullOrWhiteSpace(message)) continue;
+            if (message == "/exit") break;
+            
             await Writer.WriteLineAsync(message);
             await Writer.FlushAsync();
         }
     }
-    private async Task ReceiveMessageAsync(StreamReader Reader)
+    private async Task ReceiveMessageAsync(StreamReader Reader, CancellationToken token)
     {
-        while (true)
+        while (!token.IsCancellationRequested)
         {
             try
             {
@@ -132,21 +140,22 @@ class ClientObject
                 try
                 {
                     message = await Reader.ReadLineAsync();
-                    if (message is null)
-                    {
-                        break;
-                    }
+
+                    if (string.IsNullOrWhiteSpace(message)) continue;
                     if (message == "/exit" || message == "/quit")
                     {
-                        Exit(message, userName);
+                        await Exit(message, userName);
+                        break;
                     }
+
                     message = $"{userName}: {message}";
                     WriteLine(message);
                     await server.BroadcastMessageAsync(message, Id);
                 }
                 catch
                 {
-                    Exit(message, userName);
+                    await Exit(message, userName);
+                    break;
                 }
             }
         }
@@ -160,12 +169,11 @@ class ClientObject
             Close();
         }
     }
-    private void Exit(string message, string userName)
+    private async Task Exit(string? message, string? userName)
     {
         message = $"{userName} покинул чат";
         WriteLine(message);
         await server.BroadcastMessageAsync(message, Id);
-        break;
     }
     protected internal void Close()
     {
