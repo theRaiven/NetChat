@@ -136,16 +136,17 @@ class ClientObject
                     {
                         break;
                     }
+                    if (message == "/exit" || message == "/quit")
+                    {
+                        Exit(message, userName);
+                    }
                     message = $"{userName}: {message}";
                     WriteLine(message);
                     await server.BroadcastMessageAsync(message, Id);
                 }
                 catch
                 {
-                    message = $"{userName} покинул чат";
-                    WriteLine(message);
-                    await server.BroadcastMessageAsync(message, Id);
-                    break;
+                    Exit(message, userName);
                 }
             }
         }
@@ -158,6 +159,13 @@ class ClientObject
             server.RemoveConnection(Id);
             Close();
         }
+    }
+    private void Exit(string message, string userName)
+    {
+        message = $"{userName} покинул чат";
+        WriteLine(message);
+        await server.BroadcastMessageAsync(message, Id);
+        break;
     }
     protected internal void Close()
     {
