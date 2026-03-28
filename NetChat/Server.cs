@@ -1,33 +1,37 @@
-﻿using System.Net;
+﻿using System.Threading.Channels;
+using System.Net;
+using System.Net.Security;
 using System.Net.Sockets;
+using System.Security.Authentication;
+using System.Security.Cryptography.X509Certificates;
 using System.Text.Json;
-using System.Collections.Concurrent;
 using static System.Console;
+
 namespace NetChat;
 
 class ServerObject
 {
     TcpListener tcpListener = new TcpListener(IPAddress.Any, 8888); // сервер для прослушивания
     readonly List<ClientObject> clients = new List<ClientObject>(); // все подключения
-    readonly ConcurrentQueue<(string message, string senderId)> messageQueue = new();
+    readonly Channel<(string message, string senderId)> messageQueue =
+        Channel.CreateUnbounded<(string message, string senderId)>();
+
     readonly object locker = new();
 
+    X509Certificate2 certificate;
+    public ServerObject()
+    {
+        certificate = new X509Certificate2("server.pfx", "password");
+    }
     protected internal void EnqueueMessage(string message, string senderId)
     {
-        messageQueue.Enqueue((message, senderId));
+        messageQueue.Writer.TryWrite((message, senderId));
     }
     protected internal async Task ProcessMessageQueueAsync()
     {
-        while (true)
+        await foreach (var item in messageQueue.Reader.ReadAllAsync())
         {
-            if (messageQueue.TryDequeue(out var item))
-            {
-                await BroadcastMessageAsync(item.message, item.senderId);
-            }
-            else
-            {
-                await Task.Delay(10); // небольшая задержка для снижения нагрузки
-            }
+            await BroadcastMessageAsync(item.message, item.senderId);
         }
     }
     protected internal async Task ListenAsync()
@@ -44,8 +48,9 @@ class ServerObject
                 TcpClient tcpClient = await tcpListener.AcceptTcpClientAsync();
                 
                 WriteLine($"Подключен клиент {tcpClient.Client.RemoteEndPoint}");
-                
-                ClientObject clientObject = new ClientObject(tcpClient, this);
+
+                ClientObject clientObject = new ClientObject(tcpClient, this, certificate);
+
                 lock (locker)
                 {
                     clients.Add(clientObject);
@@ -82,7 +87,6 @@ class ServerObject
             try
             {
                 await client.Writer.WriteLineAsync(message);
-                await client.Writer.FlushAsync();
             }
             catch
             {
@@ -138,15 +142,27 @@ class ClientObject
 
     TcpClient client;
     ServerObject server;
-
-    public ClientObject(TcpClient tcpClient, ServerObject serverObject)
+    X509Certificate2 certificate;
+    public ClientObject(TcpClient tcpClient, ServerObject serverObject, X509Certificate2 cert)
     {
         client = tcpClient;
         server = serverObject;
+        certificate = cert;
 
-        var stream = client.GetStream();  // получаем NetworkStream для взаимодействия с сервером
-        Reader = new StreamReader(stream);
-        Writer = new StreamWriter(stream);
+        var sslStream = new SslStream(client.GetStream(), false);
+
+        sslStream.AuthenticateAsServer(
+            certificate,
+            clientCertificateRequired: false,
+            enabledSslProtocols: SslProtocols.Tls13,
+            checkCertificateRevocation: false);
+
+        Reader = new StreamReader(sslStream);
+        Writer = new StreamWriter(sslStream)
+        {
+            AutoFlush = true
+        };
+
     }
     public async Task ProcessAsync()
     {

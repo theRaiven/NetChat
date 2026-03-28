@@ -1,6 +1,8 @@
-﻿using System.Net.Sockets;
-using static System.Console;
+﻿using System.Net.Security;
+using System.Net.Sockets;
 using System.Text.Json;
+using static System.Console;
+using static System.Net.Mime.MediaTypeNames;
 
 namespace NetChat;
 class Client
@@ -29,11 +31,19 @@ class Client
         try
         {
             await client.ConnectAsync(Host, Port);  // подключаемся к серверу
-            
-            var stream = client.GetStream();
 
-            Reader = new StreamReader(stream);
-            Writer = new StreamWriter(stream);
+            var sslStream = new SslStream(
+                            client.GetStream(),
+                            false,
+                            (sender, cert, chain, errors) => true);
+
+            await sslStream.AuthenticateAsClientAsync(Host);
+
+            Reader = new StreamReader(sslStream);
+            Writer = new StreamWriter(sslStream)
+            {
+                AutoFlush = true
+            };
 
             if (Writer is null || Reader is null) return;
 
@@ -67,7 +77,6 @@ class Client
         string jsonJoin = JsonSerializer.Serialize(joinMsg);
 
         await Writer.WriteLineAsync(jsonJoin);
-        await Writer.FlushAsync();
 
         WriteLine("\tДля отправки сообщений введите сообщение и нажмите Enter");
         WriteLine("\tДля выхода введите /exit");
@@ -82,16 +91,20 @@ class Client
                 ChatMessage exitMessage = new ChatMessage { Type = "exit" , User = UserName };
 
                 await Writer.WriteLineAsync(JsonSerializer.Serialize(exitMessage));
-                await Writer.FlushAsync();
                 break;
             } 
                 
             
-            ChatMessage msg = new ChatMessage { Type = "message", User = UserName, Text = message };
+            ChatMessage msg = new ChatMessage
+            {
+                Type = "message", 
+                User = UserName,
+                Text = Crypto.Encrypt(message)
+            };
+
             string jsonMsg = JsonSerializer.Serialize(msg);
             
             await Writer.WriteLineAsync(jsonMsg);
-            await Writer.FlushAsync();
         }
     }
     private async Task ReceiveMessageAsync(StreamReader Reader, CancellationToken token)
@@ -105,10 +118,28 @@ class Client
 
                 ChatMessage? chatMessage = JsonSerializer.Deserialize<ChatMessage>(message);
                 if (chatMessage == null) continue;
-                Print($"{chatMessage.User}: {chatMessage.Text}");
+                if (string.IsNullOrEmpty(chatMessage.Text)) continue;
+
+                string text = chatMessage.Text ?? "";
+
+                if (chatMessage.Type == "message")
+                {
+                    try
+                    {
+                        text = Crypto.Decrypt(text);
+                    }
+                    catch
+                    {
+                        text = "[decrypt error]";
+                    }
+                }
+
+                Print($"{chatMessage.User}: {text}");
+
             }
-            catch
+            catch (Exception ex)
             {
+                WriteLine($"Receive error: {ex.Message}");
                 break;
             }
         }
